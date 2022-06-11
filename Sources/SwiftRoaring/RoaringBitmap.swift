@@ -197,31 +197,38 @@ public final class RoaringBitmap: Sequence, Equatable, CustomStringConvertible,
         lhs.formUnion(rhs)
     }
 
+    @inlinable @inline(__always)
+    func combine(with others: [RoaringBitmap]) -> ContiguousArray<UnsafePointer<roaring_bitmap_t>?> {
+        var out = ContiguousArray<UnsafePointer<roaring_bitmap_t>?>(capacity: others.count + 1)
+        out.append(self.ptr)
+
+        for ptr in others {
+            out.append(ptr.ptr)
+        }
+        return out
+    }
+
     ///
     /// Compute the union of 'number' bitmaps. See also `roaring_bitmap_or_many_heap`.
-    /// Caller is responsible for freeing the result.
     ///
-    public func unionMany(_ xs: [RoaringBitmap]) -> Self {
-        let ptr = UnsafeMutablePointer<Optional<UnsafePointer<roaring_bitmap_t>>>.allocate(capacity: xs.count + 1)
-        ptr[0] = UnsafePointer<roaring_bitmap_t>(self.ptr)
-        for (index, bitmap) in xs.enumerated() {
-            ptr[index + 1] = UnsafePointer<roaring_bitmap_t>(bitmap.ptr)
+    public func unionMany(_ others: [RoaringBitmap]) -> Self {
+        var ptrs = self.combine(with: others)
+
+        return ptrs.withUnsafeMutableBufferPointer { ptrs in
+            Self(ptr: croaring.roaring_bitmap_or_many(ptrs.count, ptrs.baseAddress!))
         }
-        return Self(ptr: croaring.roaring_bitmap_or_many(xs.count + 1, ptr))
     }
     ///
     /// Compute the union of 'number' bitmaps using a heap. This can
     /// sometimes be faster than `roaring_bitmap_or_many` which uses
-    /// a naive algorithm. Caller is responsible for freeing the
-    /// result.
+    /// a naive algorithm.
     ///
-    public func unionManyHeap(_ xs: [RoaringBitmap]) -> Self {
-        let ptr = UnsafeMutablePointer<Optional<UnsafePointer<roaring_bitmap_t>>>.allocate(capacity: xs.count + 1)
-        ptr[0] = UnsafePointer<roaring_bitmap_t>(self.ptr)
-        for (index, bitmap) in xs.enumerated() {
-            ptr[index + 1] = UnsafePointer<roaring_bitmap_t>(bitmap.ptr)
+    public func unionManyHeap(_ others: [RoaringBitmap]) -> Self {
+        var ptrs = self.combine(with: others)
+
+        return ptrs.withUnsafeMutableBufferPointer { ptrs in
+            Self(ptr: croaring.roaring_bitmap_or_many_heap(UInt32(ptrs.count), ptrs.baseAddress!))
         }
-        return Self(ptr: croaring.roaring_bitmap_or_many_heap(UInt32(xs.count + 1), ptr))
     }
 
     ///
@@ -259,13 +266,12 @@ public final class RoaringBitmap: Sequence, Equatable, CustomStringConvertible,
     ///
     /// Compute the xor of 'number' bitmaps.
     ///
-    public func symmetricDifferenceMany(_ xs: [RoaringBitmap]) -> Self {
-        let ptr = UnsafeMutablePointer<Optional<UnsafePointer<roaring_bitmap_t>>>.allocate(capacity: xs.count + 1)
-        ptr[0] = UnsafePointer<roaring_bitmap_t>(self.ptr)
-        for (index, bitmap) in xs.enumerated() {
-            ptr[index + 1] = UnsafePointer<roaring_bitmap_t>(bitmap.ptr)
+    public func symmetricDifferenceMany(_ others: [RoaringBitmap]) -> Self {
+        var ptrs = self.combine(with: others)
+
+        return ptrs.withUnsafeMutableBufferPointer { ptrs in
+            Self(ptr: croaring.roaring_bitmap_xor_many(ptrs.count, ptrs.baseAddress!))
         }
-        return Self(ptr: croaring.roaring_bitmap_xor_many(xs.count + 1, ptr))
     }
 
     ///
@@ -333,8 +339,7 @@ public final class RoaringBitmap: Sequence, Equatable, CustomStringConvertible,
     ///
     /// (For expert users who seek high performance.)
     ///
-    /// Computes the union between two bitmaps and returns new bitmap. The caller is
-    /// responsible for memory management.
+    /// Computes the union between two bitmaps and returns new bitmap.
     ///
     /// The lazy version defers some computations such as the maintenance of the
     /// cardinality counts. Thus you need to call
@@ -521,22 +526,15 @@ public final class RoaringBitmap: Sequence, Equatable, CustomStringConvertible,
     @inlinable @inline(__always)
     @discardableResult
     public func insert(_ newMember: UInt32) -> (inserted: Bool, memberAfterInsert: UInt32) {
-        let contains = self.contains(newMember)
-        if !contains {
-            self.add(newMember)
-        }
-        return (!contains, newMember)
+        let inserted = self.addCheck(newMember)
+        return (inserted, newMember)
     }
 
     @inlinable @inline(__always)
     @discardableResult
     public func update(with newMember: UInt32) -> UInt32? {
-        let (inserted, _) = self.insert(newMember)
-        if inserted {
-            return nil
-        } else {
-            return newMember
-        }
+        guard self.addCheck(newMember) else { return newMember }
+        return nil
     }
 
     ///
@@ -545,11 +543,7 @@ public final class RoaringBitmap: Sequence, Equatable, CustomStringConvertible,
     @inlinable @inline(__always)
     @discardableResult
     public func remove(_ value: UInt32) -> UInt32? {
-        let result = self.contains(value)
-        croaring.roaring_bitmap_remove(self.ptr, value)
-        if result {
-            return value
-        }
+        guard self.removeCheck(value) else { return value }
         return nil
     }
 
@@ -671,11 +665,7 @@ public final class RoaringBitmap: Sequence, Equatable, CustomStringConvertible,
     }
 
     ///
-    /// Convert the bitmap to an array. Write the output to "ans",
-    /// caller is responsible to ensure that there is enough memory
-    /// allocated
-    /// (e.g., ans = malloc(roaring_bitmap_get_cardinality(mybitmap)
-    ///   * sizeof(uint32_t))
+    /// Convert the bitmap to an array.
     ///
     public func toArray() -> [UInt32] {
         let count = (Int(self.count) * MemoryLayout<UInt32>.size)/4
@@ -991,5 +981,13 @@ public final class RoaringBitmap: Sequence, Equatable, CustomStringConvertible,
     public func hash(into hasher: inout Hasher) {
         let hash = self.hashValue
         hash.hash(into: &hasher)
+    }
+}
+
+extension RangeReplaceableCollection {
+    @inlinable @inline(__always)
+    init(capacity: Int) {
+        self.init()
+        self.reserveCapacity(capacity)
     }
 }
